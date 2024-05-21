@@ -1,15 +1,17 @@
 package com.hpgnd.eldewlauncher;
 
 import com.google.gson.Gson;
+import kong.unirest.core.Unirest;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.net.URL;
 import java.text.SimpleDateFormat;
 import java.util.Base64;
 import java.util.Date;
@@ -19,6 +21,8 @@ import java.util.Map;
 import java.util.TimeZone;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 public class Main {
     private static final Pattern chatRegex = Pattern.compile("(\\[)((?:[0]?[1-9]|[1][012])[-:\\/.](?:(?:[0-2]?\\d{1})|(?:[3][01]{1}))[-:\\/.](?:(?:\\d{1}\\d{1})))(?![\\d])( )((?:(?:[0-1][0-9])|(?:[2][0-3])|(?:[0-9])):(?:[0-5][0-9])(?::[0-5][0-9])?(?:\\s?(?:am|AM|pm|PM))?)(\\])( )(<)((?:.*))(\\/)((?:.*))(\\/)((?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))(?![\\d])(>)( )((?:.*))");
@@ -33,6 +37,9 @@ public class Main {
     public static void main(String[] args) {
         gson = new Gson();
         try {
+            if(args.length == 2 && args[0].contains("http") && args[0].contains(".zip")){
+                processRemoteConfig(args[0], args[1]);
+            }
             parseConfig();
             startGame();
             if(process != null) {
@@ -46,6 +53,81 @@ public class Main {
         }
     }
 
+    private static void processRemoteConfig(String url, String playlist) {
+        System.out.println("Using remote configs from '" + url + "' and playlist '" + playlist + "'");
+        File dataDir = new File("data"),
+                serverDir = new File(dataDir, "server"),
+                gameVarDir = new File(dataDir, "game_variants"),
+                mapVarDir = new File(dataDir, "map_variants"),
+                playlistZip = new File("playlist.zip");
+        if(!dataDir.exists()) dataDir.mkdirs();
+        if(!serverDir.exists()) serverDir.mkdirs();
+        if(!gameVarDir.exists()) serverDir.mkdirs();
+        if(!mapVarDir.exists()) serverDir.mkdirs();
+        if(downloadFile(url, playlistZip)){
+            try (FileInputStream fis = new FileInputStream(playlistZip); ZipInputStream zis = new ZipInputStream(fis)){
+                ZipEntry ze;
+                while((ze = zis.getNextEntry()) != null){
+
+                    String fileName = ze.getName();
+                    if(fileName.contains(playlist + "/data/server/voting.json")){
+                        File votingJson = new File(serverDir, "voting.json");
+                        if(!writeZipFile(zis, votingJson)){
+                            throw new Exception("Failed to unzip voting.json");
+                        }
+                        System.out.println("Unzipping to " + votingJson.getAbsolutePath());
+                    }
+
+                    if(fileName.contains(playlist + "/data/server/mods.json")){
+                        File modsJson = new File(serverDir, "mods.json");
+                        if(!writeZipFile(zis, modsJson)){
+                            throw new Exception("Failed to unzip mods.json");
+                        }
+                        System.out.println("Unzipping to " + modsJson.getAbsolutePath());
+                    }
+
+                    if(fileName.contains("data/game_variants/") && !ze.isDirectory()){
+                        String localPath = fileName.split("data/game_variants/")[1];
+                        File file = new File(gameVarDir, localPath);
+                        file.mkdirs();
+                        if(!writeZipFile(zis, file)){
+                            throw new Exception("Failed to unzip '" + fileName + "' to '" + localPath + "'");
+                        }
+                        System.out.println("Unzipping to " + file.getAbsolutePath());
+                    }
+
+                    if(fileName.contains("data/map_variants/") && !ze.isDirectory()){
+                        String localPath = fileName.split("data/map_variants/")[1];
+                        File file = new File(mapVarDir, localPath);
+                        file.mkdirs();
+                        if(!writeZipFile(zis, file)){
+                            throw new Exception("Failed to unzip '" + fileName + "' to '" + localPath + "'");
+                        }
+                        System.out.println("Unzipping to " + file.getAbsolutePath());
+                    }
+                }
+                zis.closeEntry();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+            playlistZip.delete();
+        }
+    }
+
+    private static boolean writeZipFile(ZipInputStream zis, File file) {
+        if(file.exists()) file.delete();
+        try (FileOutputStream fos = new FileOutputStream(file)) {
+            byte[] buffer = new byte[1024];
+            int len;
+            while ((len = zis.read(buffer)) > 0) {
+                fos.write(buffer, 0, len);
+            }
+            return true;
+        } catch (Exception e){
+            e.printStackTrace();
+            return false;
+        }
+    }
     private static void parseConfig(){
         try (BufferedReader reader = new BufferedReader(new FileReader("data/dewrito_prefs.cfg"))){
             String line;
@@ -144,7 +226,7 @@ public class Main {
                 rcon.send("Server.SendChatToRconClients 1");
                 keepAlive.start();
             }, (msg) -> {
-                if(msg.startsWith("0.7.0")) return;
+                if(msg.startsWith("0.7.1")) return;
 
                 else if (msg.startsWith("accept")) {
                     System.out.println("[RCON] Successfully Connected.");
@@ -226,19 +308,46 @@ public class Main {
     }
 
     private static String get(String url) {
-        StringBuilder result = new StringBuilder();
         try {
-            HttpURLConnection http = (HttpURLConnection) new URL(url).openConnection();
-            http.setRequestMethod("GET");
-            if(!gamePassword.isEmpty())
-                http.setRequestProperty("Authorization", "Basic " + Base64.getEncoder().encodeToString(("dorito:" + gamePassword).getBytes()));
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(http.getInputStream()))) {
-                for (String line; (line = reader.readLine()) != null; ) {
-                    result.append(line);
-                }
-            }
-        } catch (IOException ignored) { }
-        return result.toString();
+            return Unirest.get(url).header("Authorization", "Basic " + Base64.getEncoder().encodeToString(("dorito:" + gamePassword).getBytes())).asString().getBody();
+        } catch (Exception e){
+            return "";
+        }
+//        StringBuilder result = new StringBuilder();
+//        try {
+//            HttpURLConnection http = (HttpURLConnection) new URL(url).openConnection();
+//            http.setRequestMethod("GET");
+//            if(!gamePassword.isEmpty())
+//                http.setRequestProperty("Authorization", "Basic " + Base64.getEncoder().encodeToString(("dorito:" + gamePassword).getBytes()));
+//            try (BufferedReader reader = new BufferedReader(new InputStreamReader(http.getInputStream()))) {
+//                for (String line; (line = reader.readLine()) != null; ) {
+//                    result.append(line);
+//                }
+//            }
+//        } catch (IOException ignored) { }
+//        return result.toString();
+    }
+
+    private static boolean downloadFile(String url, File file){
+        if(file.exists()) file.delete();
+        System.out.println("Downloading file '" + url + "'");
+        return Unirest.get(url)
+                .asFile(file.getAbsolutePath())
+                .ifFailure((failure) -> {
+                    System.out.println("Failed to download '" + url + "'. Response code '" + failure.getStatus() + ": " + failure.getStatusText() + "'");
+                })
+                .isSuccess();
+//        try (BufferedInputStream in = new BufferedInputStream(new URL(url).openStream()); FileOutputStream fileOutputStream = new FileOutputStream(file)) {
+//            byte dataBuffer[] = new byte[1024];
+//            int bytesRead;
+//            while ((bytesRead = in.read(dataBuffer, 0, 1024)) != -1) {
+//                fileOutputStream.write(dataBuffer, 0, bytesRead);
+//            }
+//            return true;
+//        } catch (Exception e){
+//            e.printStackTrace();
+//            return false;
+//        }
     }
 
     private static boolean isChat(String line) {
